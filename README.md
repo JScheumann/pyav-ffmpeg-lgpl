@@ -1,4 +1,8 @@
-# pyav-ffmpeg
+# pyav-ffmpeg-lgpl
+
+This is an **LGPL-only fork** of [pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg). It builds FFmpeg the same way as upstream, except that the GPL-licensed encoders **x264** and **x265** are not compiled in (`--enable-libx264` / `--enable-libx265` removed, both `Package()` entries removed from `codec_group`). This keeps the resulting FFmpeg build under LGPL v2.1+/v3 only, so it can be linked into closed-source/proprietary products without GPL copyleft obligations.
+
+Note: H.264/H.265 *decoding* is unaffected (FFmpeg's native decoders are part of its own LGPL codebase and never depended on x264/x265). What is lost is *software encoding* of H.264/H.265 via libx264/libx265; hardware encoders (NVENC/AMF/VideoToolbox/QSV, enabled below) are unaffected since they are not GPL code. See upstream for the original GPL build: [PyAV-Org/pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg).
 
 This project provides binary builds of FFmpeg and its dependencies for [PyAV](https://github.com/PyAV-Org/PyAV). These builds are used in order to provide binary wheels of PyAV, allowing users to easily install PyAV without perform error-prone compilations.
 
@@ -21,8 +25,6 @@ Currently FFmpeg 9.0.1 is built with the following packages enabled for all plat
 - png 1.6.58
 - webp 1.6.0
 - libvmaf 3.2.0
-- x264 b35605ace3ddf7c1a5d67a2eb553f034aef41d55 (except armv7l)
-- x265 4.3
 
 The following additional packages are also enabled on Linux:
 

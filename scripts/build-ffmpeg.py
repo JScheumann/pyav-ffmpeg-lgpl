@@ -180,10 +180,8 @@ def main():
         "--enable-zlib",
     ]
 
-    # x264 is skipped on 32-bit ARM (armv7)
-    ffmpeg_package.build_arguments.append("--enable-libx265")
-    if not is_arm32:
-        ffmpeg_package.build_arguments.append("--enable-libx264")
+    # x264 and x265 intentionally NOT enabled here (both GPLv2) to keep this
+    # FFmpeg build LGPL-only -- see pkg.py, both Package() entries were removed too.
 
     if use_cuda:
         ffmpeg_package.build_arguments.extend(["--enable-nvenc", "--enable-nvdec"])
@@ -245,11 +243,9 @@ def main():
 
     if use_gnutls:
         packages += gnutls_group
-    if is_arm32:
-        # x264 is not built on 32-bit ARM (armv7)
-        packages += [p for p in codec_group if p.name != "x264"]
-    else:
-        packages += codec_group
+    # x264 was the only codec_group package excluded on 32-bit ARM;
+    # since x264/x265 were removed entirely, codec_group now applies to all platforms.
+    packages += codec_group
     packages += [ffmpeg_package]
 
     # Disable runtime CPU detection for opus on Windows ARM64

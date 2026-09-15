@@ -139,22 +139,7 @@ codec_group = [
             "-Denable_tools=false",
         ],
     ),
-    Package(
-        name="x264",
-        source_url="https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2",
-        sha256="6eeb82934e69fd51e043bd8c5b0d152839638d1ce7aa4eea65a3fedcf83ff224",
-        # assembly contains textrels which are not supported by musl
-        build_arguments=(
-            "--disable-cli --disable-lsmash --disable-swscale --disable-ffms --disable-opencl --enable-strip" + (" --disable-asm" if is_musllinux else "")
-        ).split(" "),
-    ),
-    Package(
-        name="x265",
-        source_url="https://github.com/Multicorewareinc/x265/releases/download/4.3/x265_4.3.tar.gz",
-        sha256="83c53e4c8bbb8f1e33ed59e10a7d621d1d7801ca853910c3eb41f038b8ffb121",
-        build_system="cmake",
-        source_dir="source",
-    ),
+    # x264 and x265 intentionally removed (both GPLv2) to keep this build LGPL-only.
 ]
 
 alsa_package = Package(
