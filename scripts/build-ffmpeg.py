@@ -1,7 +1,6 @@
 import argparse
 import glob
 import gzip
-import hashlib
 import os
 import platform
 import shutil
@@ -9,7 +8,7 @@ import subprocess
 import sys
 import tarfile
 
-from cibuildpkg import Builder, Package, fetch, log_group, run
+from cibuildpkg import Builder, run
 from pkg import *
 
 plat = platform.system()
@@ -21,8 +20,7 @@ def make_archive_deterministic(path: str) -> None:
     Static archives (.a files) embed the file modification time (and uid/gid) of
     each member in a 60-byte header.  Tools like ar(1), libtool -static, and ar -M
     do not always produce deterministic timestamps even when SOURCE_DATE_EPOCH is set
-    or the -D flag is requested, especially in custom CMake commands (e.g. x265's
-    multi-lib merge).  Zeroing these fields in-place is the safest cross-platform fix.
+    or the -D flag is requested.  Zeroing these fields in-place is the safest cross-platform fix.
     """
     MAGIC = b"!<arch>\n"
     HEADER_SIZE = 60
@@ -92,19 +90,6 @@ def main():
     machine = platform.machine().lower()
     is_arm32 = machine in {"armv7l", "armv8l", "arm"}
     is_arm = machine in {"arm64", "aarch64"} or is_arm32
-    is_riscv = machine in {"riscv64"}
-
-    use_alsa = plat == "Linux"
-    # CUDA, AMF, and Intel VPL are not available on ARM64 Windows
-    use_cuda = plat in {"Linux", "Windows"} and not is_arm and not is_riscv
-    use_amf = plat in {"Linux", "Windows"} and not is_arm and not is_riscv
-
-    # Use Intel VPL (Video Processing Library) if supported to enable Intel QSV (Quick Sync Video)
-    # hardware encoders/decoders on modern integrated and discrete Intel GPUs.
-    use_libvpl = plat in {"Linux", "Windows"} and not is_arm
-
-    # Use GnuTLS only on Linux, FFmpeg has native TLS backends for macOS and Windows.
-    use_gnutls = plat == "Linux"
 
     output_dir = os.path.abspath("output")
     if plat == "Linux" and os.environ.get("CIBUILDWHEEL") == "1":
@@ -132,74 +117,25 @@ def main():
         for tool in tools:
             run(["where", tool])
 
-    if plat == "Linux" and (is_musllinux or shutil.which("xxd") is None):
-        with log_group("install system packages"):
-            # libvmaf uses xxd to embed its built-in models. BusyBox xxd,
-            # provided by musllinux images, cannot write C output to a file.
-            if is_musllinux:
-                run(["apk", "add", "--no-cache", "xxd"])
-            elif shutil.which("dnf"):
-                run(["dnf", "-y", "install", "vim-common"])
-            elif shutil.which("yum"):
-                run(["yum", "-y", "install", "vim-common"])
-            elif shutil.which("apt-get"):
-                run(["apt-get", "update"])
-                run(["apt-get", "install", "-y", "xxd"])
-            else:
-                raise RuntimeError("Unable to install xxd")
-
-    with log_group("install python packages"):
-        run(["pip", "install", "cmake", "meson", "ninja"])
-
+    # VP8/VP9-decode-only build. --disable-everything turns off every codec,
+    # (de)muxer, parser, bitstream filter, protocol, filter, indev and outdev;
+    # we then enable exactly what PyAV consumers of this fork need. Nothing
+    # external is linked and nothing is autodetected from the host, so the
+    # result contains only FFmpeg's own LGPL v2.1+ code.
     ffmpeg_package.build_arguments = [
+        "--disable-everything",
+        "--disable-autodetect",
         "--disable-programs",
         "--disable-doc",
-        "--disable-libxml2",
-        "--disable-lzma",  # or re-add xz package
-        "--disable-libtheora",
-        "--disable-libfreetype",
-        "--disable-libfontconfig",
-        "--disable-libbluray",
-        "--disable-libopenjpeg",
-        (
-            "--enable-mediafoundation"
-            if plat == "Windows"
-            else "--disable-mediafoundation"
-        ),
-        "--enable-version3",
-        "--enable-alsa" if use_alsa else "--disable-alsa",
-        "--enable-gnutls" if use_gnutls else "--disable-gnutls",
-        "--enable-libdav1d",
-        "--enable-libmp3lame",
-        "--enable-libopus",
-        "--enable-libsvtav1",
-        "--enable-libvmaf",
-        "--enable-libvpx",
-        "--enable-libwebp",
-        "--enable-libxcb" if plat == "Linux" else "--disable-libxcb",
-        "--enable-zlib",
+        "--disable-network",
+        # iconv is picked up even with --disable-autodetect (glibc builtin on
+        # Linux, libiconv DLL on Windows); nothing here needs it.
+        "--disable-iconv",
+        "--enable-decoder=vp8,vp9",
     ]
 
-    # x264 and x265 intentionally NOT enabled here (both GPLv2) to keep this
-    # FFmpeg build LGPL-only -- see pkg.py, both Package() entries were removed too.
-
-    if use_cuda:
-        ffmpeg_package.build_arguments.extend(["--enable-nvenc", "--enable-nvdec"])
-
-    if use_amf:
-        ffmpeg_package.build_arguments.append("--enable-amf")
-
-    if use_libvpl:
-        ffmpeg_package.build_arguments.append("--enable-libvpl")
-
     if plat == "Darwin":
-        ffmpeg_package.build_arguments.extend(
-            [
-                "--enable-videotoolbox",
-                "--enable-audiotoolbox",
-                "--extra-ldflags=-Wl,-ld_classic",
-            ]
-        )
+        ffmpeg_package.build_arguments.append("--extra-ldflags=-Wl,-ld_classic")
 
     if plat == "Linux" and "RUNNER_ARCH" in os.environ:
         # FFmpeg expects "arm" for 32-bit ARM, not the uname "armv7l".
@@ -219,53 +155,14 @@ def main():
             ["--cc=clang", "--cxx=clang++", "--arch=aarch64"]
         )
 
-    ffmpeg_package.build_arguments.extend(
-        [
-            "--disable-encoder=avui,dca,mlp,opus,s302m,sonic,sonic_ls,truehd",
-            "--disable-decoder=sonic",
-            "--disable-libjack",
-            "--disable-indev=jack",
-            "--disable-filter=gfxcapture",  # gfxcapture_winrt C++ causes build failure on Win Arm
-        ]
-    )
-
     packages = []
     if plat != "Darwin" and "nasm" not in available_tools and machine in {"x86_64", "amd64", "i686", "i386"}:
         packages.append(nasm_package)
-    if use_alsa:
-        packages += [alsa_package]
-    if use_cuda:
-        packages += [nvheaders_package]
-    if use_amf:
-        packages += [amfheaders_package]
-    if use_libvpl:
-        packages += [libvpl_package]
-
-    if use_gnutls:
-        packages += gnutls_group
-    # x264 was the only codec_group package excluded on 32-bit ARM;
-    # since x264/x265 were removed entirely, codec_group now applies to all platforms.
-    packages += codec_group
     packages += [ffmpeg_package]
-
-    # Disable runtime CPU detection for opus on Windows ARM64
-    # (no CPU detection method available for this platform)
-    if plat == "Windows" and is_arm:
-        for pkg in packages:
-            if pkg.name == "opus":
-                pkg.build_arguments.append("--disable-rtcd")
-                break
 
     # No Intel Mac we target can run AVX-512 (and Rosetta cannot either)
     if plat == "Darwin" and not is_arm:
-        no_avx512 = {
-            "ffmpeg": "--disable-avx512",
-            "vpx": "--disable-avx512",
-            "libsvtav1": "-DENABLE_AVX512=OFF",
-        }
-        for pkg in packages:
-            if pkg.name in no_avx512:
-                pkg.build_arguments.append(no_avx512[pkg.name])
+        ffmpeg_package.build_arguments.append("--disable-avx512")
 
     for package in packages:
         builder.build(package, for_builder=package.name == "nasm")
@@ -297,23 +194,13 @@ def main():
             .splitlines()[0]
             .strip()
         )
+        # FFmpeg is plain C with no external dependencies in this build, so
+        # only the compiler runtime DLLs are needed.
         if is_arm64:
-            # CLANGARM64 uses clang/libc++ instead of gcc/libstdc++
-            dll_names = (
-                "libc++.dll",
-                "libiconv-2.dll",
-                "libunwind.dll",
-                "libwinpthread-1.dll",
-                "zlib1.dll",
-            )
+            # CLANGARM64 uses clang/libunwind instead of gcc
+            dll_names = ("libunwind.dll", "libwinpthread-1.dll")
         else:
-            dll_names = (
-                "libgcc_s_seh-1.dll",
-                "libiconv-2.dll",
-                "libstdc++-6.dll",
-                "libwinpthread-1.dll",
-                "zlib1.dll",
-            )
+            dll_names = ("libgcc_s_seh-1.dll", "libwinpthread-1.dll")
         for name in dll_names:
             shutil.copy(os.path.join(mingw_bindir, name), os.path.join(dest_dir, "bin"))
 

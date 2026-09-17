@@ -1,33 +1,61 @@
 # pyav-ffmpeg-lgpl
 
-This is an **LGPL-only fork** of [pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg). It builds FFmpeg the same way as upstream, except that the GPL-licensed encoders **x264** and **x265** are not compiled in (`--enable-libx264` / `--enable-libx265` removed, both `Package()` entries removed from `codec_group`). This keeps the resulting FFmpeg build under LGPL v2.1+/v3 only, so it can be linked into closed-source/proprietary products without GPL copyleft obligations.
+A **VP8/VP9-decode-only, LGPL-only** fork of
+[PyAV-Org/pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg). It produces
+the prebuilt FFmpeg tarballs that [JScheumann/PyAV_lgpl](https://github.com/JScheumann/PyAV_lgpl)
+bundles into its wheels.
 
-Note: H.264/H.265 *decoding* is unaffected (FFmpeg's native decoders are part of its own LGPL codebase and never depended on x264/x265). What is lost is *software encoding* of H.264/H.265 via libx264/libx265; hardware encoders (NVENC/AMF/VideoToolbox/QSV, enabled below) are unaffected since they are not GPL code. See upstream for the original GPL build: [PyAV-Org/pyav-ffmpeg](https://github.com/PyAV-Org/pyav-ffmpeg).
+## What is built
 
-This project provides binary builds of FFmpeg and its dependencies for [PyAV](https://github.com/PyAV-Org/PyAV). These builds are used in order to provide binary wheels of PyAV, allowing users to easily install PyAV without perform error-prone compilations.
+FFmpeg is configured with
 
-The builds are provided for several platforms:
+```
+--disable-everything --disable-autodetect --disable-network
+--enable-decoder=vp8,vp9
+```
 
-- Linux (x86_64, aarch64, armv7l, ppc64le, riscv64)
+so the libraries contain **only FFmpeg's own code** (libavutil, libavcodec,
+libavformat, libavdevice, libavfilter, libswscale, libswresample) with exactly two
+components enabled: the native VP8 and VP9 decoders. `libswscale` is kept because PyAV
+uses it for pixel-format conversion (`VideoFrame.to_ndarray`).
+
+There are no external libraries (no x264/x265, no libvpx, no lame/opus/dav1d,
+no GnuTLS, no hardware encoder headers) and nothing is autodetected from the
+build host, so the result is plain **LGPL v2.1 or later**. `--enable-gpl`,
+`--enable-nonfree` and `--enable-version3` are never passed.
+
+Everything that is not needed to decode VP8/VP9 is deliberately absent: no other
+decoders, no encoders, no demuxers/muxers, no protocols, no filters, no
+devices. Consumers feed raw VP8 frames to `av.CodecContext.create("vp8", "r")`
+directly; they cannot `av.open()` files or streams with this build.
+
+Why: the consuming product only needs to decode VP8/VP9 (royalty-free codecs
+with irrevocable patent grants from Google), and shipping only that keeps both the
+copyright (LGPL vs. GPL) and the patent situation (no H.264/HEVC/AAC code in
+the binary) simple to audit.
+
+## Platforms
+
+- Linux (x86_64, aarch64, armv7l, ppc64le, riscv64), manylinux and musllinux
 - macOS (x86_64, arm64)
 - Windows (x86_64, aarch64)
 
-Features
---------
+## Building
 
-Currently FFmpeg 9.0.1 is built with the following packages enabled for all platforms:
+The GitHub Actions workflow in `.github/workflows/build-ffmpeg.yml` builds all
+platforms on push and attaches the tarballs to a GitHub release when one is
+published. Locally, on any supported platform:
 
-- [lamer](https://github.com/basswood-io/lamer) 3.101.0
-- opus 1.6.1
-- dav1d 1.5.4
-- libsvtav1 4.2.0
-- vpx 1.16.0
-- png 1.6.58
-- webp 1.6.0
-- libvmaf 3.2.0
+```
+python scripts/grab.py             # download the FFmpeg (and nasm) sources
+python scripts/build-ffmpeg.py /tmp/vendor
+```
 
-The following additional packages are also enabled on Linux:
+The tarball ends up in `output/`. Verify the result from Python:
 
-- gnutls 3.8.13
-- nettle 4.0
-- unistring 1.4.2
+```python
+import av, av._core
+print(av._core.library_meta["libavcodec"]["license"])   # LGPL version 2.1 or later
+print("libx264" in av.codecs_available)                 # False
+print(av.codec.Codec("vp8", "r").name)                  # vp8
+```

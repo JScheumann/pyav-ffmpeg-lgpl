@@ -4,13 +4,11 @@ import contextlib
 import os
 import platform
 import shutil
-import struct
 import subprocess
 import tarfile
 import tempfile
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass, field, replace
 
 from pkg import *
 
@@ -95,11 +93,7 @@ class Builder:
 
         with log_group(f"build {package.name}"):
             self._extract(package)
-            if package.name == "lamer":
-                self._build_lame(package, for_builder=for_builder)
-            elif package.name == "x265":
-                self._build_x265(package)
-            elif package.build_system == "cmake":
+            if package.build_system == "cmake":
                 self._build_with_cmake(package, for_builder=for_builder)
             elif package.build_system == "meson":
                 self._build_with_meson(package, for_builder=for_builder)
@@ -163,37 +157,6 @@ class Builder:
             run(make_command, env=env)
             run(install_command, env=env)
 
-    def _build_lame(self, package: Package, for_builder: bool) -> None:
-        # basswood-io/lamer builds libmp3lame with a plain Makefile. Build only
-        # the static encoder library (the `lib` target, not the ncurses CLI
-        # frontend) as position-independent code -- it is
-        # linked into the shared libavcodec -- then install it where FFmpeg's
-        # configure looks (-lmp3lame, <lame/lame.h>).
-        package_source_path = os.path.join(
-            self.build_dir, package.name, package.source_dir
-        )
-        env = self._environment(for_builder=for_builder)
-        prefix = self._prefix(for_builder=for_builder)
-
-        make_vars: list[str] = []
-        if platform.system() == "Windows":
-            # The CLANGARM64 toolchain ships llvm-ar/llvm-ranlib, not ar/ranlib.
-            if platform.machine().lower() in {"arm64", "aarch64"}:
-                env.setdefault("AR", "llvm-ar")
-                env.setdefault("RANLIB", "llvm-ranlib")
-            else:
-                env.setdefault("CC", "gcc")
-        else:
-            # -fPIC is required to link the static archive into libavcodec.so.
-            make_vars.append("PIC=1")
-
-        with chdir(package_source_path):
-            run(["make", "-j", "4", "lib", *make_vars], env=env)
-            run(
-                ["make", "install", f"PREFIX={self._mangle_path(prefix)}", *make_vars],
-                env=env,
-            )
-
     def _build_with_autoconf(self, package: Package, for_builder: bool) -> None:
         assert package.build_system == "autoconf"
         package_path = os.path.join(self.build_dir, package.name)
@@ -223,56 +186,6 @@ class Builder:
             "--libdir=" + self._mangle_path(os.path.join(prefix, "lib")),
             "--prefix=" + self._mangle_path(prefix),
         ]
-
-        if package.name == "x264":
-            # Disable asm on Windows ARM64 (no nasm available)
-            if platform.system() == "Windows" and platform.machine().lower() in {"arm64", "aarch64"}:
-                configure_args.append("--disable-asm")
-                # Specify host to ensure correct resource compiler target
-                configure_args.append("--host=aarch64-w64-mingw32")
-
-        if package.name == "vpx":
-            if platform.system() == "Darwin":
-                if platform.machine() == "arm64":
-                    configure_args += ["--target=arm64-darwin20-gcc"]
-                elif platform.machine() == "x86_64":
-                    configure_args += ["--target=x86_64-darwin20-gcc"]
-            elif platform.system() == "Windows":
-                if platform.machine().lower() in {"arm64", "aarch64"}:
-                    configure_args += ["--target=arm64-win64-gcc"]
-                    # Link pthread for ARM64 Windows
-                    prepend_env(env, "LDFLAGS", "-lpthread")
-                else:
-                    configure_args += ["--target=x86_64-win64-gcc"]
-            elif platform.system() == "Linux":
-                if "RUNNER_ARCH" in os.environ:
-                    prepend_env(env, "CFLAGS", "-pthread")
-                    prepend_env(env, "CXXFLAGS", "-pthread")
-                    prepend_env(env, "LDFLAGS", "-pthread")
-
-        if package.name == "ffmpeg" and platform.system() == "Windows":
-            prepend_env(env, "LDFLAGS", "-LC:/PROGRA~1/OpenSSL/lib")
-            prepend_env(
-                env,
-                "PKG_CONFIG_PATH",
-                "C:/msys64/usr/lib/pkgconfig",
-                separator=";",
-            )
-            # Debug: print pkg-config info
-            print(f"PKG_CONFIG_PATH: {env.get('PKG_CONFIG_PATH')}")
-            print(f"PKG_CONFIG: {env.get('PKG_CONFIG')}")
-            import glob
-            pc_files = glob.glob(os.path.join(prefix, "lib", "pkgconfig", "*.pc"))
-            print(f"PC files in {prefix}/lib/pkgconfig: {pc_files}")
-            # Test pkgconf directly
-            import subprocess
-            result = subprocess.run(
-                ["pkgconf", "--modversion", "dav1d"],
-                env=env,
-                capture_output=True,
-                text=True
-            )
-            print(f"pkgconf dav1d test: returncode={result.returncode}, stdout={result.stdout}, stderr={result.stderr}")
 
         # build package
         os.makedirs(package_build_path, exist_ok=True)
@@ -308,12 +221,6 @@ class Builder:
         if platform.system() == "Darwin":
             cmake_args.append("-DCMAKE_INSTALL_NAME_DIR=" + os.path.join(prefix, "lib"))
 
-        if package.name == "srt" and platform.system() == "Linux":
-            if platform.libc_ver()[0] == "glibc":
-                run(["yum", "-y", "install", "openssl-devel"])
-            else:
-                run(["apk", "add", "openssl-dev"])
-
         # build package
         os.makedirs(package_build_path, exist_ok=True)
         with chdir(package_build_path):
@@ -344,84 +251,6 @@ class Builder:
             )
             run(["ninja", "--verbose"], env=env)
             run(["ninja", "install"], env=env)
-
-    def _build_x265(self, package: Package) -> None:
-        assert package.name == "x265"
-        assert len(package.build_arguments) == 0
-
-        # Build x265 three times:
-        #  1: Build 12 bits static library version
-        #  2: Build 10 bits static library version
-        #  3: Build 8 bits shared library, linking also 10 and 12 bits
-        # This last version will support 8, 10 and 12 bits pixel formats
-        package_path = os.path.join(self.build_dir, package.name)
-
-        # self._build_with_cmake always install, install intermediate
-        # builds in dummy directory
-        dummy_install_path = os.path.join(package_path, "dummy_install_path")
-
-        # For 10/12 bits version, only x86_64 has assembly instructions available
-        flags_high_bits = []
-
-        disable_sve = platform.system() == "Linux" and platform.machine() == "aarch64"
-        if platform.machine() not in {"x86_64", "amd64"}:
-            flags_high_bits.append("-DENABLE_ASSEMBLY=0")
-            flags_high_bits.append("-DENABLE_ALTIVEC=0")
-
-            if disable_sve:
-                flags_high_bits.append("-DENABLE_SVE2=OFF")
-
-        # x265 greps /proc/cpuinfo for NEON, which reports the aarch64 host's
-        # flags ("asimd") inside the 32-bit ARM container. Its NEON .S files are
-        # assembled regardless, so tell it NEON is there or they get -mfpu=vfp.
-        arm32_flags = (
-            ["-DCPU_HAS_NEON=1"]
-            if platform.machine().lower() in {"armv7l", "armv8l", "arm"}
-            else []
-        )
-
-        x265_12bits = replace(
-            package,
-            build_dir="x265-12bits",
-            build_arguments=[
-                "-DHIGH_BIT_DEPTH=1",
-                "-DMAIN12=1",
-                "-DEXPORT_C_API=0",
-                "-DENABLE_CLI=0",
-                "-DENABLE_SHARED=0",
-                "-DCMAKE_INSTALL_PREFIX=" + dummy_install_path,
-                *flags_high_bits,
-            ],
-        )
-        self._build_with_cmake(package=x265_12bits, for_builder=False)
-
-        x265_10bits = replace(
-            package,
-            build_dir="x265-10bits",
-            build_arguments=[
-                "-DHIGH_BIT_DEPTH=1",
-                "-DEXPORT_C_API=0",
-                "-DENABLE_CLI=0",
-                "-DENABLE_SHARED=0",
-                "-DCMAKE_INSTALL_PREFIX=" + dummy_install_path,
-                *flags_high_bits,
-            ],
-        )
-        self._build_with_cmake(package=x265_10bits, for_builder=False)
-
-        package_path = os.path.join(self.build_dir, package.name)
-        with chdir(os.path.join(package_path, x265_12bits.build_dir)):
-            os.rename("libx265.a", "libx265-12bits.a")
-        with chdir(os.path.join(package_path, x265_10bits.build_dir)):
-            os.rename("libx265.a", "libx265-10bits.a")
-
-        package.build_arguments = [
-            "-DEXTRA_LIB=x265-10bits.a;x265-12bits.a",
-            "-DLINKED_10BIT=1",
-            "-DLINKED_12BIT=1",
-            "-DEXTRA_LINK_FLAGS=-L../x265-10bits -L../x265-12bits",
-        ] + (["-DENABLE_SVE2=OFF"] if disable_sve else []) + arm32_flags
-        self._build_with_cmake(package=package, for_builder=False)
 
     def _extract(self, package: Package) -> None:
         path = os.path.join(self.build_dir, package.name)
